@@ -5,13 +5,6 @@ for %%I in ("%~dp0.") do set "PROJECT_DIR=%%~fI"
 set "APP_URL=http://127.0.0.1:5173/"
 set "PID_FILE=%PROJECT_DIR%\.amazon-image-studio-dev.pid"
 
-where npm >nul 2>nul
-if errorlevel 1 (
-  echo npm was not found. Please install Node.js first.
-  pause
-  exit /b 1
-)
-
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "$project = (Resolve-Path -LiteralPath '%PROJECT_DIR%').Path;" ^
   "$appName = [System.Text.Encoding]::UTF8.GetString([System.Convert]::FromBase64String('5Lqa6ams6YCK5Zu+54mH5bel5L2c5Y+w'));" ^
@@ -30,11 +23,21 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
   "  Write-Host ('Port 5173 is already used by another process. Please close it first. PID: ' + $existing.OwningProcess);" ^
   "  exit 1;" ^
   "}" ^
+  "$ensureScript = Join-Path $project 'scripts\ensure-dev-dependencies.ps1';" ^
+  "& powershell -NoProfile -ExecutionPolicy Bypass -File $ensureScript -ProjectDir $project;" ^
+  "if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE; }" ^
   "$cmd = 'title ' + $serverTitle + ' && npm run dev -- --host 127.0.0.1 --port 5173 --strictPort';" ^
   "$process = Start-Process -FilePath 'cmd.exe' -ArgumentList @('/k', $cmd) -WorkingDirectory $project -PassThru;" ^
   "Set-Content -LiteralPath $pidFile -Value $process.Id -Encoding ASCII;" ^
   "Start-Sleep -Seconds 3;" ^
   "Start-Process '%APP_URL%';" ^
   "Write-Host ('Started ' + $appName + ' at %APP_URL%');"
+
+if errorlevel 1 (
+  echo.
+  echo Failed to start Amazon Image Studio.
+  pause
+  exit /b 1
+)
 
 endlocal
