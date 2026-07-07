@@ -5,7 +5,9 @@ import { isApiProxyAvailable, isApiProxyLocked, readClientDevProxyConfig } from 
 import { useStore, exportData, importData, clearData, type SettingsTab } from '../store'
 import {
   createDefaultOpenAIProfile,
+  createDefaultAmazonPlannerProfile,
   DEFAULT_CHAT_MODEL,
+  DEFAULT_AMAZON_PLANNER_PROFILE_ID,
   DEFAULT_FAL_BASE_URL,
   DEFAULT_FAL_MODEL,
   DEFAULT_IMAGES_MODEL,
@@ -13,8 +15,10 @@ import {
   DEFAULT_RESPONSES_MODEL,
   DEFAULT_SETTINGS,
   findEquivalentApiProfile,
+  getAmazonPlannerProfile,
   getApiProviderLabel,
   getActiveApiProfile,
+  getVisibleApiProfiles,
   importCustomProviderSettingsFromJson,
   isAmazonPlannerProfile,
   isOfficialDeepSeekPlannerProfile,
@@ -339,7 +343,9 @@ export default function SettingsModal() {
   const apiProxyConfig = readClientDevProxyConfig()
   const apiProxyAvailable = isApiProxyAvailable(apiProxyConfig)
   const apiProxyLocked = isApiProxyLocked(apiProxyConfig)
-  const activeProfile = draft.profiles.find((profile) => profile.id === draft.activeProfileId) ?? draft.profiles[0] ?? getActiveApiProfile(draft)
+  const singleConnectionMode = draft.apiSetupMode === 'single-connection'
+  const profileMenuProfiles = singleConnectionMode ? getVisibleApiProfiles(draft) : draft.profiles
+  const activeProfile = profileMenuProfiles.find((profile) => profile.id === draft.activeProfileId) ?? profileMenuProfiles[0] ?? draft.profiles[0] ?? getActiveApiProfile(draft)
   const apiProxyChecked = activeProfile.provider === 'openai' && (apiProxyLocked || activeProfile.apiProxy)
   const apiProxyEnabled = apiProxyAvailable && activeProfile.provider === 'openai' && apiProxyChecked
   const activeProviderIsOpenAICompatible = isOpenAICompatibleProvider(draft, activeProfile.provider)
@@ -388,8 +394,13 @@ export default function SettingsModal() {
     apiMode === 'responses' ? 'Responses API' : apiMode === 'chat' ? 'Chat Completions' : 'Images API'
   const amazonPlannerProfiles = draft.profiles.filter(isAmazonPlannerProfile)
   const selectedAmazonPlannerProfile = amazonPlannerProfiles.find((profile) => profile.id === draft.amazonPlannerProfileId) ?? null
-  const selectedPlannerUsesOfficialDeepSeek = selectedAmazonPlannerProfile
-    ? isOfficialDeepSeekPlannerProfile(selectedAmazonPlannerProfile)
+  const effectiveAmazonPlannerProfile = getAmazonPlannerProfile(draft)
+  const singleConnectionCanUseActiveConnection = activeProfile.provider === 'openai'
+  const plannerUsesActiveConnection = singleConnectionMode && singleConnectionCanUseActiveConnection
+  const plannerApiMode = selectedAmazonPlannerProfile?.apiMode ?? 'responses'
+  const plannerModel = selectedAmazonPlannerProfile?.model ?? getDefaultModelForMode(plannerApiMode)
+  const selectedPlannerUsesOfficialDeepSeek = effectiveAmazonPlannerProfile
+    ? isOfficialDeepSeekPlannerProfile(effectiveAmazonPlannerProfile)
     : false
   const amazonPlannerProfileOptions = amazonPlannerProfiles.length
     ? amazonPlannerProfiles.map((profile) => ({
@@ -574,6 +585,11 @@ export default function SettingsModal() {
       if (profile.codexCli) url.searchParams.set('codexCli', 'true')
       if (profile.streamImages !== DEFAULT_SETTINGS.streamImages) url.searchParams.set('streamImages', String(Boolean(profile.streamImages)))
       if (profile.streamPartialImages !== DEFAULT_STREAM_PARTIAL_IMAGES) url.searchParams.set('streamPartialImages', String(normalizeStreamPartialImages(profile.streamPartialImages)))
+      if (draft.apiSetupMode === 'single-connection') {
+        url.searchParams.set('apiSetupMode', 'single-connection')
+        url.searchParams.set('plannerApiMode', plannerApiMode)
+        url.searchParams.set('plannerModel', plannerModel.trim() || getDefaultModelForMode(plannerApiMode))
+      }
 
       let result = url.toString()
       if (!options.includeApiKey) {
@@ -639,6 +655,47 @@ export default function SettingsModal() {
   const commitActiveProfilePatch = (patch: Partial<ApiProfile>) => {
     const nextDraft = getDraftWithActiveProfilePatch(patch)
     commitSettings(nextDraft)
+  }
+
+  const ensurePlannerProfile = (sourceDraft: AppSettings) => {
+    const existing = sourceDraft.profiles.find((profile) => profile.id === sourceDraft.amazonPlannerProfileId && isAmazonPlannerProfile(profile))
+    if (existing) return { draft: sourceDraft, profile: existing }
+
+    const usedIds = new Set(sourceDraft.profiles.map((profile) => profile.id))
+    const plannerProfile = createDefaultAmazonPlannerProfile({
+      id: usedIds.has(DEFAULT_AMAZON_PLANNER_PROFILE_ID) ? newId('planner') : DEFAULT_AMAZON_PLANNER_PROFILE_ID,
+    })
+    return {
+      draft: normalizeDraftSettings({
+        ...sourceDraft,
+        profiles: [...sourceDraft.profiles, plannerProfile],
+        amazonPlannerProfileId: plannerProfile.id,
+      }),
+      profile: plannerProfile,
+    }
+  }
+
+  const getDraftWithPlannerProfilePatch = (patch: Partial<ApiProfile>) => {
+    const ensured = ensurePlannerProfile(draft)
+    const nextProfiles = ensured.draft.profiles.map((profile) =>
+      profile.id === ensured.profile.id ? { ...profile, ...patch } : profile,
+    )
+    return { ...ensured.draft, profiles: nextProfiles }
+  }
+
+  const updatePlannerProfile = (patch: Partial<ApiProfile>, commit = false) => {
+    const nextDraft = getDraftWithPlannerProfilePatch(patch)
+    setDraft(nextDraft)
+    if (commit) commitSettings(nextDraft)
+  }
+
+  const commitPlannerProfilePatch = (patch: Partial<ApiProfile>) => {
+    commitSettings(getDraftWithPlannerProfilePatch(patch))
+  }
+
+  const setApiSetupMode = (mode: AppSettings['apiSetupMode']) => {
+    const ensured = mode === 'single-connection' ? ensurePlannerProfile(draft).draft : draft
+    commitSettings({ ...ensured, apiSetupMode: mode })
   }
 
   const handleClose = () => {
@@ -874,7 +931,7 @@ export default function SettingsModal() {
   }
 
   const deleteProfile = (id: string) => {
-    if (draft.profiles.length <= 1) return
+    if ((singleConnectionMode ? profileMenuProfiles : draft.profiles).length <= 1) return
     if (id === reusedTaskApiProfileId) setReusedTaskApiProfile(null)
     const nextProfiles = draft.profiles.filter((item) => item.id !== id)
     const nextDraft = normalizeDraftSettings({
@@ -1259,9 +1316,40 @@ export default function SettingsModal() {
             
             {activeTab === 'api' && (
               <div className="space-y-4">
+                <div className="rounded-2xl border border-gray-200/70 bg-white/55 p-3 dark:border-white/[0.08] dark:bg-white/[0.03]">
+                  <div className="mb-2 flex items-center justify-between gap-2">
+                    <span className="text-sm font-semibold text-gray-800 dark:text-gray-100">API 配置模式</span>
+                    <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${singleConnectionMode ? 'bg-blue-100 text-blue-700 dark:bg-blue-500/20 dark:text-blue-200' : 'bg-gray-100 text-gray-600 dark:bg-white/[0.08] dark:text-gray-300'}`}>
+                      {singleConnectionMode ? '单连接' : '标准'}
+                    </span>
+                  </div>
+                  <div className="grid gap-2 sm:grid-cols-2" role="radiogroup" aria-label="API 配置模式">
+                    <button
+                      type="button"
+                      onClick={() => setApiSetupMode('standard')}
+                      className={`rounded-xl border px-3 py-2 text-left transition ${!singleConnectionMode ? 'border-blue-300 bg-blue-50 text-blue-800 ring-2 ring-blue-500/10 dark:border-blue-400/50 dark:bg-blue-500/10 dark:text-blue-100' : 'border-gray-200/70 bg-white/60 text-gray-600 hover:bg-gray-50 dark:border-white/[0.08] dark:bg-white/[0.03] dark:text-gray-300 dark:hover:bg-white/[0.06]'}`}
+                      role="radio"
+                      aria-checked={!singleConnectionMode}
+                    >
+                      <span className="block text-xs font-semibold">标准双配置</span>
+                      <span data-selectable-text className="mt-1 block text-xs leading-relaxed opacity-80">生图和 AI 策划分别选择配置，兼容原有使用方式。</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setApiSetupMode('single-connection')}
+                      className={`rounded-xl border px-3 py-2 text-left transition ${singleConnectionMode ? 'border-blue-300 bg-blue-50 text-blue-800 ring-2 ring-blue-500/10 dark:border-blue-400/50 dark:bg-blue-500/10 dark:text-blue-100' : 'border-gray-200/70 bg-white/60 text-gray-600 hover:bg-gray-50 dark:border-white/[0.08] dark:bg-white/[0.03] dark:text-gray-300 dark:hover:bg-white/[0.06]'}`}
+                      role="radio"
+                      aria-checked={singleConnectionMode}
+                    >
+                      <span className="block text-xs font-semibold">反代 / OpenRouter 单连接</span>
+                      <span data-selectable-text className="mt-1 block text-xs leading-relaxed opacity-80">只填写当前连接的 URL/Key，策划单独设置接口和模型。</span>
+                    </button>
+                  </div>
+                </div>
+
                 <div>
                   <div className="mb-1.5 flex items-center gap-1.5">
-                    <span className="block text-sm text-gray-600 dark:text-gray-300">当前配置</span>
+                    <span className="block text-sm text-gray-600 dark:text-gray-300">{singleConnectionMode ? '当前连接' : '当前配置'}</span>
                     <span className="relative inline-flex">
                       <button
                         type="button"
@@ -1280,7 +1368,7 @@ export default function SettingsModal() {
                         onTouchEnd={clearProfileImportUrlTooltipTimer}
                         onTouchCancel={clearProfileImportUrlTooltipTimer}
                         className="flex h-5 w-5 items-center justify-center rounded-md text-gray-400 transition hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-white/[0.08] dark:hover:text-gray-200"
-                        aria-label={`复制导入配置「${activeProfile.name}」的 URL`}
+                        aria-label={`复制导入${singleConnectionMode ? '连接' : '配置'}「${activeProfile.name}」的 URL`}
                       >
                         <LinkIcon className="h-3.5 w-3.5" />
                       </button>
@@ -1306,12 +1394,12 @@ export default function SettingsModal() {
                         onTouchEnd={clearDuplicateProfileTooltipTimer}
                         onTouchCancel={clearDuplicateProfileTooltipTimer}
                         className="flex h-5 w-5 items-center justify-center rounded-md text-gray-400 transition hover:bg-gray-100 hover:text-gray-600 dark:hover:bg-white/[0.08] dark:hover:text-gray-200"
-                        aria-label={`复制一份配置「${activeProfile.name}」`}
+                        aria-label={`复制一份${singleConnectionMode ? '连接' : '配置'}「${activeProfile.name}」`}
                       >
                         <CopyIcon className="h-3.5 w-3.5" />
                       </button>
                       <ViewportTooltip visible={duplicateProfileTooltipVisible} className="whitespace-nowrap">
-                        复制当前配置
+                        {singleConnectionMode ? '复制当前连接' : '复制当前配置'}
                       </ViewportTooltip>
                     </span>
                   </div>
@@ -1349,13 +1437,13 @@ export default function SettingsModal() {
                             }}
                             className="flex w-full cursor-pointer items-center justify-between gap-2 px-3 py-2 text-left text-xs font-medium text-blue-600 transition-colors hover:bg-blue-50 dark:text-blue-400 dark:hover:bg-blue-500/10"
                           >
-                            <span className="truncate font-semibold">创建新配置</span>
+                            <span className="truncate font-semibold">{singleConnectionMode ? '创建新连接' : '创建新配置'}</span>
                             <span className="flex h-5 w-5 shrink-0 items-center justify-center">
                               <PlusIcon className="h-4 w-4" />
                             </span>
                           </button>
                           <div>
-                            {draft.profiles.map(profile => (
+                            {profileMenuProfiles.map(profile => (
                               <div
                                 key={profile.id}
                                 data-profile-id={profile.id}
@@ -1407,12 +1495,12 @@ export default function SettingsModal() {
                                       confirmCopyProfileImportUrl(profile)
                                     }}
                                     className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-gray-400 opacity-60 transition-all hover:bg-gray-100 hover:text-gray-600 hover:opacity-100 dark:hover:bg-white/[0.08] dark:hover:text-gray-200"
-                                    aria-label={`复制导入配置「${profile.name}」的 URL`}
+                                    aria-label={`复制导入${singleConnectionMode ? '连接' : '配置'}「${profile.name}」的 URL`}
                                     title="复制导入 URL"
                                   >
                                     <LinkIcon className="h-3.5 w-3.5" />
                                   </button>
-                                  {draft.profiles.length > 1 && (
+                                  {profileMenuProfiles.length > 1 && (
                                     <button
                                       type="button"
                                       onClick={(e) => {
@@ -1420,12 +1508,12 @@ export default function SettingsModal() {
                                         e.stopPropagation()
                                         setConfirmDialog({
                                           title: '删除配置',
-                                          message: `确定要删除配置「${profile.name}」吗？`,
+                                          message: `确定要删除${singleConnectionMode ? '连接' : '配置'}「${profile.name}」吗？`,
                                           action: () => deleteProfile(profile.id)
                                         })
                                       }}
                                       className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-gray-400 opacity-60 transition-all hover:bg-red-50 hover:text-red-500 hover:opacity-100 dark:hover:bg-red-500/10"
-                                      aria-label="删除配置"
+                                      aria-label={singleConnectionMode ? '删除连接' : '删除配置'}
                                     >
                                       <TrashIcon className="h-3.5 w-3.5" />
                                     </button>
@@ -1444,18 +1532,57 @@ export default function SettingsModal() {
                 <div className="mb-2 flex items-center justify-between gap-2">
                   <span className="text-sm font-semibold text-blue-900 dark:text-blue-100">AI 策划配置</span>
                   <span className="rounded bg-blue-100 px-1.5 py-0.5 text-[10px] font-medium text-blue-700 dark:bg-blue-500/20 dark:text-blue-200">
-                    Chat
+                    {singleConnectionMode ? '单连接' : '独立配置'}
                   </span>
                 </div>
-                <Select
-                  value={draft.amazonPlannerProfileId}
-                  onChange={(value) => commitSettings({ ...draft, amazonPlannerProfileId: String(value) })}
-                  disabled={amazonPlannerProfiles.length === 0}
-                  options={amazonPlannerProfileOptions}
-                  className="w-full rounded-xl border border-blue-200/70 bg-white/80 px-3 py-2.5 text-sm text-blue-900 outline-none transition focus:border-blue-300 dark:border-blue-400/20 dark:bg-gray-950/40 dark:text-blue-100 dark:focus:border-blue-500/50"
-                />
+
+                {singleConnectionMode ? (
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <div className="block">
+                      <span className="mb-1.5 block text-sm text-blue-900 dark:text-blue-100">策划接口</span>
+                      <Select
+                        value={plannerApiMode}
+                        onChange={(value) => {
+                          const apiMode = value as AppSettings['apiMode']
+                          const nextModel = isDefaultModelForModeSwitch(plannerModel)
+                            ? getDefaultModelForMode(apiMode)
+                            : plannerModel
+                          updatePlannerProfile({ apiMode, model: nextModel }, true)
+                        }}
+                        options={[
+                          { label: 'Responses API (/v1/responses)', value: 'responses' },
+                          { label: 'Chat Completions (/chat/completions)', value: 'chat' },
+                        ]}
+                        className="w-full rounded-xl border border-blue-200/70 bg-white/80 px-3 py-2.5 text-sm text-blue-900 outline-none transition focus:border-blue-300 dark:border-blue-400/20 dark:bg-gray-950/40 dark:text-blue-100 dark:focus:border-blue-500/50"
+                      />
+                    </div>
+                    <label className="block">
+                      <span className="mb-1.5 block text-sm text-blue-900 dark:text-blue-100">策划模型 ID</span>
+                      <input
+                        value={plannerModel}
+                        onChange={(e) => updatePlannerProfile({ model: e.target.value })}
+                        onBlur={(e) => commitPlannerProfilePatch({ model: e.target.value })}
+                        type="text"
+                        placeholder={getDefaultModelForMode(plannerApiMode)}
+                        className="w-full rounded-xl border border-blue-200/70 bg-white/80 px-3 py-2.5 text-sm text-blue-900 outline-none transition focus:border-blue-300 dark:border-blue-400/20 dark:bg-gray-950/40 dark:text-blue-100 dark:focus:border-blue-500/50"
+                      />
+                    </label>
+                  </div>
+                ) : (
+                  <Select
+                    value={draft.amazonPlannerProfileId}
+                    onChange={(value) => commitSettings({ ...draft, amazonPlannerProfileId: String(value) })}
+                    disabled={amazonPlannerProfiles.length === 0}
+                    options={amazonPlannerProfileOptions}
+                    className="w-full rounded-xl border border-blue-200/70 bg-white/80 px-3 py-2.5 text-sm text-blue-900 outline-none transition focus:border-blue-300 dark:border-blue-400/20 dark:bg-gray-950/40 dark:text-blue-100 dark:focus:border-blue-500/50"
+                  />
+                )}
                 <div data-selectable-text className="mt-2 text-xs leading-relaxed text-blue-800 dark:text-blue-200">
-                  只用于首页 Amazon 面板的 AI 策划；普通生图只接受当前配置为 Images API。默认分为「生图」和「AI策划」两套配置：生图使用 Images API + gpt-image-2，AI 策划使用 Responses API + gpt-5.5。
+                  {singleConnectionMode
+                    ? plannerUsesActiveConnection
+                      ? `只用于首页 Amazon 面板的 AI 策划；URL、API Key、超时等连接信息来自当前连接「${activeProfile.name}」，策划接口和模型在这里单独设置。`
+                      : '当前连接不是 OpenAI 兼容连接，AI 策划会回退使用独立配置。请切回标准双配置选择可用策划配置，或把当前连接切到 OpenAI 兼容服务。'
+                    : '标准双配置模式下，AI 策划会完整使用所选配置自己的 URL、API Key、接口和模型。'}
                 </div>
                 {selectedPlannerUsesOfficialDeepSeek && (
                   <div data-selectable-text className="mt-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-relaxed text-amber-800 dark:border-amber-400/25 dark:bg-amber-400/10 dark:text-amber-100">

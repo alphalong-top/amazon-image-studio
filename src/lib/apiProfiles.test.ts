@@ -8,10 +8,12 @@ import {
   DEFAULT_OPENAI_PROFILE_ID,
   DEFAULT_RESPONSES_MODEL,
   DEFAULT_SETTINGS,
+  createDefaultAmazonPlannerProfile,
   createDefaultOpenAIProfile,
   createDefaultFalProfile,
   findEquivalentApiProfile,
   getAmazonPlannerProfile,
+  getVisibleApiProfiles,
   importCustomProviderDefinitionFromJson,
   importCustomProviderSettingsFromJson,
   isOfficialDeepSeekPlannerProfile,
@@ -725,6 +727,249 @@ describe('custom providers', () => {
 })
 
 describe('amazon planner profile', () => {
+  it('uses the independent planner profile in standard mode by default', () => {
+    const settings = normalizeSettings({
+      profiles: [
+        createDefaultOpenAIProfile({
+          id: 'image-profile',
+          name: 'Image Profile',
+          baseUrl: 'https://proxy.example.com/v1',
+          apiKey: 'shared-key',
+          apiMode: 'images',
+          model: DEFAULT_IMAGES_MODEL,
+        }),
+        createDefaultAmazonPlannerProfile({
+          id: 'planner-profile',
+          name: 'Planner Profile',
+          apiKey: '',
+          apiMode: 'chat',
+          model: 'deepseek-v4-flash',
+        }),
+      ],
+      activeProfileId: 'image-profile',
+      amazonPlannerProfileId: 'planner-profile',
+    })
+
+    expect(settings.apiSetupMode).toBe('standard')
+    expect(getAmazonPlannerProfile(settings)).toMatchObject({
+      id: 'planner-profile',
+      name: 'Planner Profile',
+      provider: 'openai',
+      baseUrl: DEFAULT_SETTINGS.baseUrl,
+      apiKey: '',
+      apiMode: 'chat',
+      model: 'deepseek-v4-flash',
+    })
+  })
+
+  it('reuses the active image profile connection in single-connection mode', () => {
+    const settings = normalizeSettings({
+      profiles: [
+        createDefaultOpenAIProfile({
+          id: 'image-profile',
+          baseUrl: 'https://proxy.example.com/v1',
+          apiKey: 'shared-key',
+          apiMode: 'images',
+          model: DEFAULT_IMAGES_MODEL,
+        }),
+        createDefaultAmazonPlannerProfile({
+          id: 'planner-profile',
+          apiKey: '',
+          apiMode: 'chat',
+          model: 'deepseek-v4-flash',
+        }),
+      ],
+      activeProfileId: 'image-profile',
+      amazonPlannerProfileId: 'planner-profile',
+      apiSetupMode: 'single-connection',
+    })
+
+    expect(settings.apiSetupMode).toBe('single-connection')
+    expect(getAmazonPlannerProfile(settings)).toMatchObject({
+      id: 'planner-profile',
+      baseUrl: 'https://proxy.example.com/v1',
+      apiKey: 'shared-key',
+      apiMode: 'chat',
+      model: 'deepseek-v4-flash',
+    })
+  })
+
+  it('hides the single-connection planner meta profile from visible connection profiles', () => {
+    const settings = normalizeSettings({
+      profiles: [
+        createDefaultOpenAIProfile({
+          id: 'image-profile',
+          name: 'Image Profile',
+          baseUrl: 'https://proxy.example.com/v1',
+          apiKey: 'shared-key',
+          apiMode: 'images',
+          model: DEFAULT_IMAGES_MODEL,
+        }),
+        createDefaultAmazonPlannerProfile({
+          id: 'planner-profile',
+          name: 'AI策划',
+          apiMode: 'responses',
+          model: DEFAULT_RESPONSES_MODEL,
+        }),
+      ],
+      activeProfileId: 'planner-profile',
+      amazonPlannerProfileId: 'planner-profile',
+      apiSetupMode: 'single-connection',
+    })
+
+    expect(settings.activeProfileId).toBe('image-profile')
+    expect(getVisibleApiProfiles(settings).map((profile) => profile.id)).toEqual(['image-profile'])
+    expect(getAmazonPlannerProfile(settings)).toMatchObject({
+      id: 'planner-profile',
+      baseUrl: 'https://proxy.example.com/v1',
+      apiKey: 'shared-key',
+      apiMode: 'responses',
+      model: DEFAULT_RESPONSES_MODEL,
+    })
+  })
+
+  it('keeps the planner profile visible in standard mode', () => {
+    const settings = normalizeSettings({
+      profiles: [
+        createDefaultOpenAIProfile({
+          id: 'image-profile',
+          apiMode: 'images',
+          model: DEFAULT_IMAGES_MODEL,
+        }),
+        createDefaultAmazonPlannerProfile({
+          id: 'planner-profile',
+          apiMode: 'responses',
+          model: DEFAULT_RESPONSES_MODEL,
+        }),
+      ],
+      activeProfileId: 'image-profile',
+      amazonPlannerProfileId: 'planner-profile',
+    })
+
+    expect(getVisibleApiProfiles(settings).map((profile) => profile.id)).toEqual(['image-profile', 'planner-profile'])
+  })
+
+  it('creates a visible connection profile when single-connection settings only contain planner metadata', () => {
+    const settings = normalizeSettings({
+      profiles: [
+        createDefaultAmazonPlannerProfile({
+          id: 'planner-profile',
+          apiMode: 'responses',
+          model: DEFAULT_RESPONSES_MODEL,
+        }),
+      ],
+      activeProfileId: 'planner-profile',
+      amazonPlannerProfileId: 'planner-profile',
+      apiSetupMode: 'single-connection',
+    })
+
+    expect(settings.activeProfileId).not.toBe('planner-profile')
+    expect(settings.profiles.find((profile) => profile.id === 'planner-profile')).toBeTruthy()
+    expect(getVisibleApiProfiles(settings)).toHaveLength(1)
+    expect(getVisibleApiProfiles(settings)[0]).toMatchObject({
+      apiMode: 'images',
+      model: DEFAULT_IMAGES_MODEL,
+    })
+  })
+
+  it('keeps an existing independent planner connection in standard mode', () => {
+    const settings = normalizeSettings({
+      profiles: [
+        createDefaultOpenAIProfile({
+          id: 'image-profile',
+          baseUrl: 'https://proxy.example.com/v1',
+          apiKey: 'image-key',
+          apiMode: 'images',
+          model: DEFAULT_IMAGES_MODEL,
+        }),
+        createDefaultAmazonPlannerProfile({
+          id: 'planner-profile',
+          baseUrl: 'https://api.deepseek.com',
+          apiKey: 'planner-key',
+          apiMode: 'chat',
+          model: 'deepseek-v4-flash',
+        }),
+      ],
+      activeProfileId: 'image-profile',
+      amazonPlannerProfileId: 'planner-profile',
+    })
+
+    expect(settings.apiSetupMode).toBe('standard')
+    expect(getAmazonPlannerProfile(settings)).toMatchObject({
+      id: 'planner-profile',
+      baseUrl: 'https://api.deepseek.com',
+      apiKey: 'planner-key',
+      apiMode: 'chat',
+      model: 'deepseek-v4-flash',
+    })
+  })
+
+  it('allows the active Chat profile to be used directly as the planner profile', () => {
+    const settings = normalizeSettings({
+      profiles: [
+        createDefaultOpenAIProfile({
+          id: 'openrouter-chat',
+          name: 'OpenRouter Chat Image',
+          baseUrl: 'https://openrouter.ai/api/v1',
+          apiKey: 'openrouter-key',
+          apiMode: 'chat',
+          model: 'google/gemini-2.5-flash-image',
+        }),
+      ],
+      activeProfileId: 'openrouter-chat',
+      amazonPlannerProfileId: 'openrouter-chat',
+      apiSetupMode: 'single-connection',
+    })
+
+    expect(settings.apiSetupMode).toBe('single-connection')
+    expect(settings.activeProfileId).toBe('openrouter-chat')
+    expect(getVisibleApiProfiles(settings).map((profile) => profile.id)).toEqual(['openrouter-chat'])
+    expect(getAmazonPlannerProfile(settings)).toMatchObject({
+      id: 'openrouter-chat',
+      baseUrl: 'https://openrouter.ai/api/v1',
+      apiKey: 'openrouter-key',
+      apiMode: 'chat',
+      model: 'google/gemini-2.5-flash-image',
+    })
+  })
+
+  it('does not force active connection reuse when the active provider is not OpenAI-compatible', () => {
+    const settings = normalizeSettings({
+      profiles: [
+        createDefaultFalProfile({
+          id: 'fal-profile',
+          apiKey: 'fal-key',
+        }),
+        createDefaultAmazonPlannerProfile({
+          id: 'planner-profile',
+          baseUrl: 'https://api.deepseek.com',
+          apiKey: 'planner-key',
+          apiMode: 'chat',
+          model: 'deepseek-v4-flash',
+        }),
+      ],
+      activeProfileId: 'fal-profile',
+      amazonPlannerProfileId: 'planner-profile',
+      apiSetupMode: 'single-connection',
+    })
+
+    expect(getAmazonPlannerProfile(settings)).toMatchObject({
+      id: 'planner-profile',
+      provider: 'openai',
+      baseUrl: 'https://api.deepseek.com',
+      apiKey: 'planner-key',
+    })
+  })
+
+  it('migrates the unpublished active-connection planner flag to single-connection mode', () => {
+    expect(normalizeSettings({
+      amazonPlannerUseActiveConnection: true,
+    }).apiSetupMode).toBe('single-connection')
+    expect(normalizeSettings({
+      amazonPlannerUseActiveConnection: false,
+    }).apiSetupMode).toBe('standard')
+  })
+
   it('auto-selects the first OpenAI Chat/Responses profile when none is configured', () => {
     const settings = normalizeSettings({
       profiles: [
@@ -770,7 +1015,7 @@ describe('amazon planner profile', () => {
     expect(getAmazonPlannerProfile(settings)?.id).toBe('next-planner')
   })
 
-  it('does not treat the active image profile as the planner profile', () => {
+  it('does not treat an independent active image profile as the planner profile', () => {
     const settings = normalizeSettings({
       profiles: [
         createDefaultOpenAIProfile({
@@ -791,6 +1036,7 @@ describe('amazon planner profile', () => {
     })
 
     expect(settings.activeProfileId).toBe('image-profile')
+    expect(settings.apiSetupMode).toBe('standard')
     expect(getAmazonPlannerProfile(settings)).toMatchObject({
       id: 'planner-profile',
       apiKey: 'planner-key',

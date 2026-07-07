@@ -3,6 +3,7 @@ import type { AmazonMarketplaceId } from './lib/amazonMarketplaces'
 // ===== 设置 =====
 
 export type ApiMode = 'images' | 'responses' | 'chat'
+export type ApiSetupMode = 'standard' | 'single-connection'
 export type AppMode = 'gallery' | 'agent'
 export type TaskWorkflow = 'amazon-listing' | 'amazon-aplus' | 'gallery' | 'agent' | 'unknown'
 export type TaskAspect = 'square' | 'landscape' | 'portrait'
@@ -104,6 +105,7 @@ export interface AppSettings {
   profiles: ApiProfile[]
   activeProfileId: string
   amazonPlannerProfileId: string
+  apiSetupMode: ApiSetupMode
   customStyleReferences: CustomStyleReference[]
 }
 

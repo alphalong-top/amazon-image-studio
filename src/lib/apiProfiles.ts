@@ -2,6 +2,7 @@ import type {
   ApiMode,
   ApiProfile,
   ApiProvider,
+  ApiSetupMode,
   AppSettings,
   CustomStyleReference,
   CustomProviderContentType,
@@ -576,6 +577,36 @@ function resolveAmazonPlannerProfileId(profiles: ApiProfile[], value: unknown): 
   return profiles.find(isAmazonPlannerProfile)?.id ?? ''
 }
 
+function normalizeApiSetupMode(input: Record<string, unknown>): ApiSetupMode {
+  if (input.apiSetupMode === 'single-connection' || input.amazonPlannerUseActiveConnection === true) {
+    return 'single-connection'
+  }
+  return 'standard'
+}
+
+function isSingleConnectionPlannerMetaProfile(
+  apiSetupMode: ApiSetupMode,
+  amazonPlannerProfileId: string,
+  profile: ApiProfile,
+): boolean {
+  return apiSetupMode === 'single-connection' &&
+    profile.id === amazonPlannerProfileId &&
+    isAmazonPlannerProfile(profile) &&
+    !canApiProfileGenerateImages(profile)
+}
+
+function getSingleConnectionProfileId(usedIds: Set<string>): string {
+  if (!usedIds.has(DEFAULT_OPENAI_PROFILE_ID)) return DEFAULT_OPENAI_PROFILE_ID
+
+  let index = 2
+  let id = `single-connection-openai-${index}`
+  while (usedIds.has(id)) {
+    index += 1
+    id = `single-connection-openai-${index}`
+  }
+  return id
+}
+
 function createDefaultProfilePair(overrides: Partial<ApiProfile> = {}): ApiProfile[] {
   return [
     createDefaultImageProfile(overrides),
@@ -725,10 +756,25 @@ export function normalizeSettings(input: Partial<AppSettings> | unknown, options
     !hasExplicitProfiles && hasTopLevelProfileFields(record),
     splitDefaultProfiles,
   )
-  const activeProfileId = typeof record.activeProfileId === 'string' && profiles.some((p) => p.id === record.activeProfileId)
+  let activeProfileId = typeof record.activeProfileId === 'string' && profiles.some((p) => p.id === record.activeProfileId)
     ? record.activeProfileId
     : profiles[0].id
   const amazonPlannerProfileId = resolveAmazonPlannerProfileId(profiles, record.amazonPlannerProfileId)
+  const apiSetupMode = normalizeApiSetupMode(record)
+  if (apiSetupMode === 'single-connection') {
+    let visibleProfiles = profiles.filter((profile) => !isSingleConnectionPlannerMetaProfile(apiSetupMode, amazonPlannerProfileId, profile))
+    if (visibleProfiles.length === 0) {
+      const usedIds = new Set(profiles.map((profile) => profile.id))
+      const connectionProfile = createDefaultImageProfile({
+        id: getSingleConnectionProfileId(usedIds),
+      })
+      profiles = [connectionProfile, ...profiles]
+      visibleProfiles = [connectionProfile]
+    }
+    if (!visibleProfiles.some((profile) => profile.id === activeProfileId)) {
+      activeProfileId = visibleProfiles[0].id
+    }
+  }
   const active = profiles.find((p) => p.id === activeProfileId) ?? profiles[0]
 
   return {
@@ -755,6 +801,7 @@ export function normalizeSettings(input: Partial<AppSettings> | unknown, options
     profiles,
     activeProfileId,
     amazonPlannerProfileId,
+    apiSetupMode,
     customStyleReferences: normalizeCustomStyleReferences(record.customStyleReferences),
   }
 }
@@ -768,6 +815,15 @@ export function getApiProviderLabel(settings: Partial<AppSettings> | unknown, pr
   if (provider === 'fal') return 'fal.ai'
   if (provider === 'openai') return 'OpenAI'
   return getCustomProviderDefinition(settings, provider)?.name ?? provider
+}
+
+export function getVisibleApiProfiles(settings: Partial<AppSettings> | unknown): ApiProfile[] {
+  const normalized = normalizeSettings(settings)
+  if (normalized.apiSetupMode !== 'single-connection') return normalized.profiles
+
+  return normalized.profiles.filter((profile) =>
+    !isSingleConnectionPlannerMetaProfile(normalized.apiSetupMode, normalized.amazonPlannerProfileId, profile),
+  )
 }
 
 export function isOpenAICompatibleProvider(settings: Partial<AppSettings> | unknown, provider: ApiProvider): boolean {
@@ -855,7 +911,27 @@ export function getActiveApiProfile(settings: Partial<AppSettings> | unknown): A
 
 export function getAmazonPlannerProfile(settings: Partial<AppSettings> | unknown): ApiProfile | null {
   const normalized = normalizeSettings(settings)
-  return normalized.profiles.find((profile) => profile.id === normalized.amazonPlannerProfileId && isAmazonPlannerProfile(profile)) ?? null
+  const plannerProfile = normalized.profiles.find((profile) => profile.id === normalized.amazonPlannerProfileId && isAmazonPlannerProfile(profile)) ?? null
+  if (!plannerProfile) return null
+
+  const activeProfile = normalized.profiles.find((profile) => profile.id === normalized.activeProfileId) ?? normalized.profiles[0] ?? null
+  if (!activeProfile || activeProfile.id === plannerProfile.id || normalized.apiSetupMode !== 'single-connection') {
+    return plannerProfile
+  }
+
+  if (activeProfile.provider !== 'openai') {
+    return plannerProfile
+  }
+
+  return {
+    ...plannerProfile,
+    provider: activeProfile.provider,
+    baseUrl: activeProfile.baseUrl,
+    apiKey: activeProfile.apiKey,
+    timeout: activeProfile.timeout,
+    codexCli: activeProfile.codexCli,
+    apiProxy: activeProfile.apiProxy,
+  }
 }
 
 export function validateApiProfile(profile: ApiProfile): string | null {
@@ -902,6 +978,7 @@ function hasOnlyDefaultProfiles(settings: AppSettings): boolean {
     settings.profiles.length === 2 &&
     settings.activeProfileId === DEFAULT_OPENAI_PROFILE_ID &&
     settings.amazonPlannerProfileId === DEFAULT_AMAZON_PLANNER_PROFILE_ID &&
+    settings.apiSetupMode === 'standard' &&
     settings.profiles.some(isDefaultOpenAIProfile) &&
     settings.profiles.some(isDefaultAmazonPlannerProfile)
 }
@@ -1069,4 +1146,5 @@ export const DEFAULT_SETTINGS: AppSettings = normalizeSettings({
   profiles: createDefaultProfilePair(),
   activeProfileId: DEFAULT_OPENAI_PROFILE_ID,
   amazonPlannerProfileId: DEFAULT_AMAZON_PLANNER_PROFILE_ID,
+  apiSetupMode: 'standard',
 })

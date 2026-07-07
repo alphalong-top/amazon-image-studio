@@ -1,5 +1,13 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { DEFAULT_CHAT_MODEL, createDefaultOpenAIProfile } from './apiProfiles'
+import {
+  DEFAULT_CHAT_MODEL,
+  DEFAULT_IMAGES_MODEL,
+  DEFAULT_RESPONSES_MODEL,
+  createDefaultAmazonPlannerProfile,
+  createDefaultOpenAIProfile,
+  getAmazonPlannerProfile,
+  normalizeSettings,
+} from './apiProfiles'
 import { DEFAULT_AMAZON_PROMPT_DRAFT } from './amazonPrompt'
 import {
   buildAmazonAPlusPlanPrompt,
@@ -407,6 +415,112 @@ describe('callAmazonPlannerApi', () => {
       planMarkdown: expect.stringContaining('MAIN 主图方案'),
       negativePrompt: 'negative MAIN',
     })
+  })
+
+  it('uses the independent planner profile connection in standard mode', async () => {
+    const apiPayload = createApiPayload('Independent planner planned tumbler')
+    const fetchMock = vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>(async () => new Response(JSON.stringify({
+      output_text: JSON.stringify(apiPayload),
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const settings = normalizeSettings({
+      profiles: [
+        createDefaultOpenAIProfile({
+          id: 'image-profile',
+          baseUrl: 'https://proxy.example.com/v1',
+          apiKey: 'shared-key',
+          apiMode: 'images',
+          model: DEFAULT_IMAGES_MODEL,
+        }),
+        createDefaultAmazonPlannerProfile({
+          id: 'planner-profile',
+          baseUrl: 'https://planner.example.com/v1',
+          apiKey: 'planner-key',
+          apiMode: 'responses',
+          model: DEFAULT_RESPONSES_MODEL,
+        }),
+      ],
+      activeProfileId: 'image-profile',
+      amazonPlannerProfileId: 'planner-profile',
+    })
+    const plannerProfile = getAmazonPlannerProfile(settings)
+    expect(plannerProfile).toMatchObject({
+      id: 'planner-profile',
+      baseUrl: 'https://planner.example.com/v1',
+      apiKey: 'planner-key',
+      apiMode: 'responses',
+      model: DEFAULT_RESPONSES_MODEL,
+    })
+
+    const result = await callAmazonPlannerApi({
+      listingText: SAMPLE_LISTING,
+      baseDraft: DEFAULT_AMAZON_PROMPT_DRAFT,
+      profile: plannerProfile!,
+    })
+
+    const [url, init] = fetchMock.mock.calls[0]!
+    expect(url).toBe('https://planner.example.com/v1/responses')
+    expect((init?.headers as Record<string, string>).Authorization).toBe('Bearer planner-key')
+    const body = JSON.parse(String(init?.body))
+    expect(body.model).toBe(DEFAULT_RESPONSES_MODEL)
+    expect(result.parsed.title).toBe('Independent planner planned tumbler')
+  })
+
+  it('uses the active profile connection in single-connection mode while keeping planner API mode and model', async () => {
+    const apiPayload = createApiPayload('Shared connection planned tumbler')
+    const fetchMock = vi.fn<(input: RequestInfo | URL, init?: RequestInit) => Promise<Response>>(async () => new Response(JSON.stringify({
+      output_text: JSON.stringify(apiPayload),
+    }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }))
+    vi.stubGlobal('fetch', fetchMock)
+
+    const settings = normalizeSettings({
+      profiles: [
+        createDefaultOpenAIProfile({
+          id: 'image-profile',
+          baseUrl: 'https://proxy.example.com/v1',
+          apiKey: 'shared-key',
+          apiMode: 'images',
+          model: DEFAULT_IMAGES_MODEL,
+        }),
+        createDefaultAmazonPlannerProfile({
+          id: 'planner-profile',
+          apiKey: '',
+          apiMode: 'responses',
+          model: DEFAULT_RESPONSES_MODEL,
+        }),
+      ],
+      activeProfileId: 'image-profile',
+      amazonPlannerProfileId: 'planner-profile',
+      apiSetupMode: 'single-connection',
+    })
+    const plannerProfile = getAmazonPlannerProfile(settings)
+    expect(plannerProfile).toMatchObject({
+      id: 'planner-profile',
+      baseUrl: 'https://proxy.example.com/v1',
+      apiKey: 'shared-key',
+      apiMode: 'responses',
+      model: DEFAULT_RESPONSES_MODEL,
+    })
+
+    const result = await callAmazonPlannerApi({
+      listingText: SAMPLE_LISTING,
+      baseDraft: DEFAULT_AMAZON_PROMPT_DRAFT,
+      profile: plannerProfile!,
+    })
+
+    const [url, init] = fetchMock.mock.calls[0]!
+    expect(url).toBe('https://proxy.example.com/v1/responses')
+    expect((init?.headers as Record<string, string>).Authorization).toBe('Bearer shared-key')
+    const body = JSON.parse(String(init?.body))
+    expect(body.model).toBe(DEFAULT_RESPONSES_MODEL)
+    expect(result.parsed.title).toBe('Shared connection planned tumbler')
   })
 
   it('uses the requested Listing image count in Responses schema, instructions, input, and result validation', async () => {

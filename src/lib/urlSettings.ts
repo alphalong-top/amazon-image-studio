@@ -1,17 +1,32 @@
 import type { ApiMode, AppSettings } from '../types'
 import { normalizeBaseUrl } from './devProxy'
 import {
+  DEFAULT_AMAZON_PLANNER_PROFILE_ID,
   DEFAULT_CHAT_MODEL,
+  createDefaultAmazonPlannerProfile,
   createDefaultOpenAIProfile,
   DEFAULT_IMAGES_MODEL,
   DEFAULT_RESPONSES_MODEL,
   findEquivalentApiProfile,
+  isAmazonPlannerProfile,
   mergeImportedSettings,
   normalizeSettings,
   normalizeStreamPartialImages,
 } from './apiProfiles'
 
-const URL_SETTING_KEYS = ['settings', 'apiUrl', 'apiKey', 'codexCli', 'apiMode', 'model', 'streamImages', 'streamPartialImages']
+const URL_SETTING_KEYS = [
+  'settings',
+  'apiUrl',
+  'apiKey',
+  'codexCli',
+  'apiMode',
+  'model',
+  'streamImages',
+  'streamPartialImages',
+  'apiSetupMode',
+  'plannerApiMode',
+  'plannerModel',
+]
 
 function getProfileDedupKey(profile: Pick<AppSettings['profiles'][number], 'provider' | 'baseUrl' | 'apiKey' | 'model' | 'apiMode' | 'streamImages' | 'streamPartialImages'>) {
   return JSON.stringify([
@@ -29,6 +44,16 @@ function createUrlProfileId(usedIds: Set<string>) {
   let id = `openai-url-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`
   while (usedIds.has(id)) {
     id = `openai-url-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`
+  }
+  return id
+}
+
+function createUrlPlannerProfileId(usedIds: Set<string>) {
+  if (!usedIds.has(DEFAULT_AMAZON_PLANNER_PROFILE_ID)) return DEFAULT_AMAZON_PLANNER_PROFILE_ID
+
+  let id = `planner-url-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`
+  while (usedIds.has(id)) {
+    id = `planner-url-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`
   }
   return id
 }
@@ -75,6 +100,28 @@ function activateFirstImportedProfile(settings: AppSettings, importedSettings: u
     : settings
 }
 
+function ensureUrlPlannerProfile(settings: AppSettings, patch: Partial<AppSettings['profiles'][number]>): AppSettings {
+  const existing = settings.profiles.find((profile) => profile.id === settings.amazonPlannerProfileId && isAmazonPlannerProfile(profile))
+  if (existing) {
+    return normalizeSettings({
+      ...settings,
+      profiles: settings.profiles.map((profile) => profile.id === existing.id ? { ...profile, ...patch } : profile),
+      amazonPlannerProfileId: existing.id,
+    })
+  }
+
+  const usedIds = new Set(settings.profiles.map((profile) => profile.id))
+  const plannerProfile = createDefaultAmazonPlannerProfile({
+    id: createUrlPlannerProfileId(usedIds),
+    ...patch,
+  })
+  return normalizeSettings({
+    ...settings,
+    profiles: [...settings.profiles, plannerProfile],
+    amazonPlannerProfileId: plannerProfile.id,
+  })
+}
+
 export function hasUrlSettingParams(searchParams: URLSearchParams) {
   return URL_SETTING_KEYS.some((key) => searchParams.has(key))
 }
@@ -93,11 +140,33 @@ export function buildSettingsFromUrlParams(currentSettings: Partial<AppSettings>
   const streamImagesParam = searchParams.get('streamImages')
   const streamPartialImagesParam = searchParams.get('streamPartialImages')
   const apiMode: ApiMode | undefined = apiModeParam === 'images' || apiModeParam === 'responses' || apiModeParam === 'chat' ? apiModeParam : undefined
+  const apiSetupModeParam = searchParams.get('apiSetupMode')
+  const apiSetupMode = apiSetupModeParam === 'single-connection'
+    ? 'single-connection'
+    : apiSetupModeParam === 'standard'
+      ? 'standard'
+      : undefined
+  const plannerApiModeParam = searchParams.get('plannerApiMode')
+  const plannerApiMode: ApiMode | undefined = plannerApiModeParam === 'responses' || plannerApiModeParam === 'chat' ? plannerApiModeParam : undefined
+  const plannerModelParam = searchParams.get('plannerModel')
+  const plannerModel = plannerModelParam !== null && plannerModelParam.trim() ? plannerModelParam.trim() : undefined
 
   const hasLegacyOpenAIParams = apiUrlParam !== null || apiKeyParam !== null || codexCliParam !== null || apiMode !== undefined || modelParam !== null || streamImagesParam !== null || streamPartialImagesParam !== null
+  const hasSetupModeParams = apiSetupMode !== undefined || plannerApiMode !== undefined || plannerModel !== undefined
   const settings = importedSettings == null
     ? normalizeSettings(currentSettings)
     : activateFirstImportedProfile(mergeImportedSettings(currentSettings, importedSettings), importedSettings)
+
+  const applySetupModeParams = (sourceSettings: AppSettings): AppSettings => {
+    let nextSettings = apiSetupMode ? normalizeSettings({ ...sourceSettings, apiSetupMode }) : sourceSettings
+    if (plannerApiMode || plannerModel) {
+      nextSettings = ensureUrlPlannerProfile(nextSettings, {
+        ...(plannerApiMode ? { apiMode: plannerApiMode } : {}),
+        ...(plannerModel ? { model: plannerModel } : {}),
+      })
+    }
+    return nextSettings
+  }
 
   if (hasLegacyOpenAIParams) {
     const profileApiMode = apiMode ?? 'images'
@@ -120,15 +189,16 @@ export function buildSettingsFromUrlParams(currentSettings: Partial<AppSettings>
 
     const existingProfile = settings.profiles.find((item) => getProfileDedupKey(item) === getProfileDedupKey(profile))
     if (existingProfile) {
-      return normalizeSettings({ ...settings, activeProfileId: existingProfile.id })
+      return applySetupModeParams(normalizeSettings({ ...settings, activeProfileId: existingProfile.id }))
     }
 
-    return normalizeSettings({
+    return applySetupModeParams(normalizeSettings({
       ...settings,
       profiles: [...settings.profiles, profile],
       activeProfileId: profile.id,
-    })
+    }))
   }
 
-  return importedSettings == null ? {} : settings
+  if (importedSettings == null && !hasSetupModeParams) return {}
+  return applySetupModeParams(settings)
 }

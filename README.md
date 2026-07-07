@@ -21,12 +21,16 @@
 按自然周（周一至周日）整理，最新一周在最上方。每个周块可展开查看本周推送内容，提交号用于回溯具体改动。
 
 <details open>
-<summary><strong>2026-07-06 至 2026-07-12</strong> - 多站点 AI 策划</summary>
+<summary><strong>2026-07-06 至 2026-07-12</strong> - 多站点 AI 策划与 API 配置模式</summary>
 
 - 亚马逊图片工作台新增目标站点选择，支持美国站、日本站、德国站、法国站、意大利站和西班牙站。
 - AI 策划会按目标站点输出本地化图片可见文案和 A+ 外部文案，生图提示词主体继续保持英文以提高模型稳定性。
 - 策划历史、任务分类、任务详情和历史搜索会保留目标站点；旧历史和旧备份缺少站点字段时默认按美国站处理。
 - A+ 模块尺寸继续沿用当前应用模板，相关策划文案改为“当前应用尺寸参考”，避免误认为已维护每站独立官方尺寸。
+- API 配置页新增“标准双配置 / 反代或 OpenRouter 单连接”模式切换，默认继续使用独立的生图配置和 AI 策划配置。
+- 单连接模式只需要维护一个当前连接的 API URL / API Key，AI 策划单独保存接口类型和模型，适合同一套反代或 OpenRouter 同时支持生图和聊天策划的场景。
+- 单连接模式会隐藏内部 `AI策划` 元配置，不再把它显示在“当前连接”列表里，避免误以为还要维护两套 URL/Key。
+- URL 参数导入保持兼容：普通 `apiUrl/apiKey` 只导入主连接，只有显式带 `apiSetupMode=single-connection` 时才恢复单连接和策划模型设置。
 - 提交：随本次 `main` 推送发布。
 
 </details>
@@ -39,7 +43,7 @@
 - A+ 自定义模块数量会进入 AI 策划请求，schema、系统提示词、用户提示词、Chat JSON guide 和结果校验都会按当前模块清单执行。
 - 生图最终提示词会自动追加期望输出分辨率，例如 `2048x2048` 或 `4096x4096`，让模型在提示词层面也知道目标尺寸。
 - Agent 批量生图和图片工具调用同步加入输出分辨率约束，减少生成尺寸和当前参数脱节。
-- 开发代理会在 API URL 与本地代理目标一致时自动启用，降低本地 HTTP/内网接口配置成本。
+- 本地开发版不再内置 API 代理；如需同源代理，请使用 Docker/Nginx 等部署端代理配置。
 - 提交：随本次 `main` 推送发布。
 
 </details>
@@ -119,7 +123,7 @@
 - 支持 2K / 4K 输出；Listing 图默认方图，A+ 图按模块比例生成高清图，并显示 Seller Central 上传建议尺寸。
 - 最终生图提示词会自动写入当前期望输出分辨率，让提示词和尺寸参数保持一致。
 - A+ 小方块模块支持单独输出标题/正文文案，和图片内文字分开，避免把长文案画进 220x220 图片里。
-- 支持 OpenAI / OpenAI 兼容图片接口，以及独立的 AI 策划 Chat Completions / Responses API 配置。
+- 支持 OpenAI / OpenAI 兼容图片接口、独立 AI 策划 Chat Completions / Responses API 配置，也支持反代或 OpenRouter 单连接模式复用同一套 URL/Key。
 - 历史记录支持按商品、来源、形状筛选；从历史记录复用或编辑 Listing / A+ 图片时，新任务会继承原商品分类。
 - 保留原项目的参考图、遮罩编辑、历史记录、批量下载、本地 IndexedDB 存储等能力。
 
@@ -239,11 +243,11 @@ stop-amazon-image-studio.bat
 
 打开页面后，点击右上角设置图标，进入 API 配置。
 
-建议准备两个配置：
+默认使用“标准双配置”：生图配置和 AI 策划配置各自独立。这样最兼容旧教程，也避免图片接口模型和文本策划模型混在一起。只有使用同一套 OpenAI 兼容反代或 OpenRouter 时，才建议在设置页顶部切换到“反代或 OpenRouter 单连接”。
 
 ### 1. 生图配置
 
-用于真正生成图片。
+生图配置用于真正生成图片。
 
 - 服务商：OpenAI 或 OpenAI 兼容接口
 - API 接口：`Images API (/v1/images)`
@@ -256,14 +260,25 @@ OpenRouter 生图模型不提供 OpenAI `/images/generations` 路径，应用会
 
 用于根据 Listing 生成 `MAIN + PT01...` 或 A+ 模块图片策划。
 
-- 服务商：OpenAI
+- 在“标准双配置”模式下，选择一个独立的 AI 策划配置
+- API URL / API Key：填写文本模型服务商的地址和 Key
 - API 接口：`Chat Completions (/chat/completions)`；OpenAI 官方也可继续使用 `Responses API (/v1/responses)`
 - 模型：文本/多模态模型，例如 DeepSeek 使用 `deepseek-v4-flash`
-- API Key：填写你自己的 Key
 
 DeepSeek 示例：API URL 填 `https://api.deepseek.com`，API 接口选择 `Chat Completions (/chat/completions)`，模型填 `deepseek-v4-flash`。当前 DeepSeek 官方 Chat Completions 接口只接收文本内容，本项目检测到该地址时会自动跳过参考图，仅用 Listing 文本做 AI 策划。
 
-在设置页中，把“AI 策划配置”选择为这个 Chat Completions 配置。这样生图和策划不需要来回切换接口类型。
+### 3. 反代 / OpenRouter 单连接模式
+
+如果你的反代或 OpenRouter 同一套 API URL / API Key 同时支持生图和聊天策划，可以在设置页顶部把 API 配置模式切到“反代或 OpenRouter 单连接”：
+
+- 当前配置里只填写一次 API URL / API Key，并设置生图接口和生图模型
+- AI 策划配置区域只设置“策划接口”和“策划模型”
+- 策划请求会复用当前配置的 URL / Key / 超时等连接信息，但不会复用生图模型
+- 设置页不会把内部 `AI策划` 元配置显示在“当前连接”列表里
+
+如果当前配置不是 OpenAI 兼容连接，单连接模式不会强行复用，AI 策划会回退到独立策划配置。此时请切回“标准双配置”，或把当前配置换成 OpenAI 兼容接口。
+
+OpenRouter 等 Chat Completions 图片服务也可以把同一个 Chat 配置同时作为当前生图配置和 AI 策划配置。
 
 AI 策划提示词已内置精炼版亚马逊图片知识库规则，包括 Listing 主图/附图规范、A+ 模块尺寸、移动端可读性和合规禁用项。原始知识库 Markdown 保存在 `docs/knowledge/` 作为规则来源备查，运行时不会把整篇原文发送给模型。
 

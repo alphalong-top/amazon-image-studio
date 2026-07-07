@@ -5,6 +5,7 @@ import {
   createDefaultOpenAIProfile,
   DEFAULT_IMAGES_MODEL,
   DEFAULT_SETTINGS,
+  getAmazonPlannerProfile,
   normalizeSettings,
 } from './apiProfiles'
 import { buildSettingsFromUrlParams, clearUrlSettingParams, hasUrlSettingParams } from './urlSettings'
@@ -19,12 +20,37 @@ describe('URL settings params', () => {
 
     expect(next.profiles).toHaveLength(3)
     expect(next.activeProfileId).not.toBe(current.activeProfileId)
+    expect(next.apiSetupMode).toBe('standard')
     expect(next.profiles.find((profile) => profile.id === next.activeProfileId)).toMatchObject({
       name: 'URL 参数配置',
       provider: 'openai',
       baseUrl: 'https://api.example.com/v1',
       apiKey: 'test-key',
       model: DEFAULT_IMAGES_MODEL,
+    })
+    expect(getAmazonPlannerProfile(next)).toMatchObject({
+      baseUrl: DEFAULT_SETTINGS.baseUrl,
+      apiKey: '',
+    })
+  })
+
+  it('restores single-connection planner metadata from explicit URL params', () => {
+    const current = normalizeSettings(DEFAULT_SETTINGS)
+    const next = normalizeSettings({
+      ...current,
+      ...buildSettingsFromUrlParams(current, new URLSearchParams('apiUrl=https://api.example.com/v1&apiKey=test-key&apiSetupMode=single-connection&plannerApiMode=chat&plannerModel=planner-chat-model')),
+    })
+
+    expect(next.apiSetupMode).toBe('single-connection')
+    expect(next.profiles.find((profile) => profile.id === next.amazonPlannerProfileId)).toMatchObject({
+      apiMode: 'chat',
+      model: 'planner-chat-model',
+    })
+    expect(getAmazonPlannerProfile(next)).toMatchObject({
+      baseUrl: 'https://api.example.com/v1',
+      apiKey: 'test-key',
+      apiMode: 'chat',
+      model: 'planner-chat-model',
     })
   })
 
@@ -133,7 +159,7 @@ describe('URL settings params', () => {
   })
 
   it('clears known URL setting params without touching unrelated params', () => {
-    const params = new URLSearchParams('apiUrl=https://api.example.com/v1&apiKey=test-key&model=test-model&streamImages=false&streamPartialImages=3&foo=bar')
+    const params = new URLSearchParams('apiUrl=https://api.example.com/v1&apiKey=test-key&model=test-model&streamImages=false&streamPartialImages=3&apiSetupMode=single-connection&plannerApiMode=chat&plannerModel=test-planner&foo=bar')
 
     expect(hasUrlSettingParams(params)).toBe(true)
     clearUrlSettingParams(params)
