@@ -1,0 +1,10 @@
+{
+  "schemaVersion": 1,
+  "images": [
+    {
+      "name": "ghcr.io/alphalong-top/amazon-image-studio",
+      "context": ".",
+      "dockerfile": "deploy/Dockerfile"
+    }
+  ]
+}
